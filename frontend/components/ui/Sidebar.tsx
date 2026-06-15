@@ -2,7 +2,8 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Archive, BookOpen, CreditCard, LayoutDashboard, Mail, MessageSquare, Settings2, Sparkles, Users } from 'lucide-react';
+import { Archive, BookOpen, CreditCard, LayoutDashboard, Mail, MessageSquare, Settings2, Sparkles, Users, Shield } from 'lucide-react';
+import { useAuth } from '../../context/AuthContext';
 
 const items = [
   { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
@@ -13,12 +14,12 @@ const items = [
   { label: 'Historique', href: '/historique', icon: MessageSquare },
   { label: 'Abonnement', href: '/abonnement', icon: Users },
   { label: 'Emails Premium', href: '/abonnement#email', icon: Mail },
-  { label: 'Admin Panel', href: '/admin', icon: Settings2 },
   { label: 'Paramètres', href: '/parametres', icon: Settings2 },
 ];
 
 export function Sidebar() {
   const pathname = usePathname();
+  const { user } = useAuth();
 
   return (
     <aside className="sticky top-8 hidden h-[calc(100vh-64px)] min-h-[720px] shrink-0 rounded-[28px] border border-white/10 bg-white/5 p-6 shadow-soft backdrop-blur-xl lg:block">
@@ -41,6 +42,15 @@ export function Sidebar() {
               </Link>
             );
           })}
+          {user?.role === 'admin' && (
+            <Link
+              href="/admin"
+              className={`flex items-center gap-3 rounded-2xl px-4 py-3 text-sm transition ${pathname === '/admin' ? 'bg-cyan-500/15 text-white' : 'text-slate-300 hover:bg-white/5 hover:text-white'}`}
+            >
+              <Shield size={18} />
+              Admin Panel
+            </Link>
+          )}
         </nav>
       </div>
     </aside>

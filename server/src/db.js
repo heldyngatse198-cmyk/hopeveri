@@ -91,6 +91,9 @@ async function runMigrations() {
         document_preferences TEXT DEFAULT '[]',
         auto_sync_enabled INTEGER NOT NULL DEFAULT 0,
         custom_rules TEXT DEFAULT '[]',
+        avatar_url TEXT,
+        avatar_color TEXT NOT NULL DEFAULT '#06b6d4',
+        background_color TEXT NOT NULL DEFAULT '#090b17',
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
@@ -112,6 +115,21 @@ async function runMigrations() {
       );
     `).run();
     sqliteDb.prepare(`CREATE INDEX IF NOT EXISTS idx_analyses_user_id ON analyses(user_id);`).run();
+    // Migration: add avatar & background columns if missing
+    try {
+      const columns = sqliteDb.prepare("PRAGMA table_info(users)").all().map(c => c.name);
+      if (!columns.includes('avatar_url')) {
+        sqliteDb.prepare("ALTER TABLE users ADD COLUMN avatar_url TEXT").run();
+      }
+      if (!columns.includes('avatar_color')) {
+        sqliteDb.prepare("ALTER TABLE users ADD COLUMN avatar_color TEXT NOT NULL DEFAULT '#06b6d4'").run();
+      }
+      if (!columns.includes('background_color')) {
+        sqliteDb.prepare("ALTER TABLE users ADD COLUMN background_color TEXT NOT NULL DEFAULT '#090b17'").run();
+      }
+    } catch (e) {
+      // Columns already exist — safe to ignore
+    }
     sqliteDb.prepare(`CREATE INDEX IF NOT EXISTS idx_analyses_created_at ON analyses(created_at);`).run();
   }
 }

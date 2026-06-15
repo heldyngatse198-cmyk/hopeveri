@@ -9,6 +9,9 @@ type User = {
   subscription: string;
   daily_quota: number;
   quota_reset_at: string | null;
+  avatar_url: string | null;
+  avatar_color: string;
+  background_color: string;
 };
 
 type AuthContextType = {
@@ -21,19 +24,23 @@ type AuthContextType = {
   logout: () => void;
   refreshUser: () => Promise<void>;
   subscribePlan: (plan: 'monthly' | 'yearly') => Promise<void>;
+  updateAvatar: (file: File) => Promise<string>;
+  updateAvatarColor: (color: string) => Promise<void>;
+  updateBackgroundColor: (color: string) => Promise<void>;
 };
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001';
+const API_URL = process.env.NEXT_PUBLIC_API_URL?.trim() || 'http://localhost:8001';
 
 async function jsonFetch(path: string, options: RequestInit = {}) {
-  const response = await fetch(`${API_URL}${path}`, {
+  // Fail fast with a clearer message when NEXT_PUBLIC_API_URL isn't set in prod
+  const url = `${API_URL}${path}`;
+  const response = await fetch(url, {
     headers: {
       'Content-Type': 'application/json',
       ...(options.headers || {}),
     },
-    credentials: 'include',
     ...options,
   });
 
@@ -67,6 +74,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           }
         })
         .catch(() => {
+          // Most likely: API_URL incorrect / backend unreachable in prod
           setToken(null);
           window.localStorage.removeItem('hopeveri_token');
         })
@@ -87,6 +95,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setToken(data.token);
       setUser(data.user);
       window.localStorage.setItem('hopeveri_token', data.token);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Échec de la connexion.';
+      // Network-level message (commonly happens when NEXT_PUBLIC_API_URL is not configured)
+      if (/Failed to fetch/i.test(msg)) {
+        throw new Error(`Impossible de contacter le backend (${API_URL}). Vérifie NEXT_PUBLIC_API_URL.`);
+      }
+      throw err;
     } finally {
       setLoading(false);
     }
@@ -136,8 +151,49 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
+  const updateAvatar = async (file: File): Promise<string> => {
+    if (!token) throw new Error('Connectez-vous.');
+    const formData = new FormData();
+    formData.append('avatar', file);
+    const response = await fetch(`${API_URL}/api/profile/avatar`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: formData,
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data?.error || 'Upload échoué.');
+    if (data?.avatar_url) {
+      setUser((prev) => prev ? { ...prev, avatar_url: data.avatar_url } : prev);
+    }
+    return data.avatar_url;
+  };
+
+  const updateAvatarColor = async (color: string) => {
+    if (!token) throw new Error('Connectez-vous.');
+    const data = await jsonFetch('/api/profile/avatar-color', {
+      method: 'POST',
+      body: JSON.stringify({ color }),
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (data?.avatar_color) {
+      setUser((prev) => prev ? { ...prev, avatar_color: data.avatar_color } : prev);
+    }
+  };
+
+  const updateBackgroundColor = async (color: string) => {
+    if (!token) throw new Error('Connectez-vous.');
+    const data = await jsonFetch('/api/profile/background-color', {
+      method: 'POST',
+      body: JSON.stringify({ color }),
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (data?.background_color) {
+      setUser((prev) => prev ? { ...prev, background_color: data.background_color } : prev);
+    }
+  };
+
   const value = useMemo(
-    () => ({ user, token, loading, error, login, register, logout, refreshUser, subscribePlan }),
+    () => ({ user, token, loading, error, login, register, logout, refreshUser, subscribePlan, updateAvatar, updateAvatarColor, updateBackgroundColor }),
     [user, token, loading, error]
   );
 

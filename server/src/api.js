@@ -9,6 +9,7 @@ const { detect } = require('./detector');
 const { humanize } = require('./humanizer');
 const { sendConfirmationEmail } = require('./mailer');
 const { verifyGoogleToken } = require('./googleAuth');
+const { checkOllama, detectWithAI, humanizeWithAI, ollamaAvailable } = require('./ollama');
 const mammoth = require('mammoth');
 const pdfParse = require('pdf-parse');
 const Tesseract = require('tesseract.js');
@@ -38,6 +39,12 @@ function getSubscriptionQuota(subscription) {
   if (subscription === 'monthly') return 50;
   if (subscription === 'yearly') return 9999;
   return 5;
+}
+
+function getDefaultAvatar(email) {
+  const colors = ['#06b6d4','#8b5cf6','#f43f5e','#10b981','#f59e0b','#3b82f6','#ec4899','#14b8a6'];
+  const hash = email.split('').reduce((a,c) => a + c.charCodeAt(0), 0);
+  return { avatar_url: null, avatar_color: colors[hash % colors.length] };
 }
 
 function parseJsonField(value, fallback) {
@@ -559,6 +566,139 @@ router.get('/admin/stats', authenticate, requireAdmin, async (req, res) => {
   const totalAnalyses = await query('SELECT COUNT(*)::int as count FROM analyses');
   const premiumUsers = await query("SELECT COUNT(*)::int as count FROM users WHERE subscription != 'free'");
   res.json({ totalUsers: totalUsers.rows[0].count, totalAnalyses: totalAnalyses.rows[0].count, premiumUsers: premiumUsers.rows[0].count });
+});
+
+// ── AVATAR & PROFILE ────────────────────────────────────────────────
+
+// Upload avatar
+router.post('/profile/avatar', authenticate, upload.single('avatar'), async (req, res) => {
+  const user = await getUserById(req.user.id);
+  if (!user || !user.active) return res.status(403).json({ error: 'Compte désactivé.' });
+
+  if (!req.file) return res.status(400).json({ error: 'Aucun fichier envoyé.' });
+
+  // Store as base64 data URI for simplicity (could use file upload service in prod)
+  const base64 = req.file.buffer.toString('base64');
+  const mime = req.file.mimetype || 'image/png';
+  const dataUri = `data:${mime};base64,${base64}`;
+
+  await query('UPDATE users SET avatar_url = $1, updated_at = now() WHERE id = $2', [dataUri, user.id]);
+  res.json({ avatar_url: dataUri, message: 'Avatar mis à jour.' });
+});
+
+// Update avatar color
+router.post('/profile/avatar-color', authenticate, async (req, res) => {
+  const { color } = req.body || {};
+  const user = await getUserById(req.user.id);
+  if (!user || !user.active) return res.status(403).json({ error: 'Compte désactivé.' });
+  if (!/^#[0-9a-fA-F]{6}$/.test(color)) return res.status(400).json({ error: 'Couleur invalide (format hex #RRGGBB).' });
+
+  await query('UPDATE users SET avatar_color = $1, updated_at = now() WHERE id = $2', [color, user.id]);
+  res.json({ avatar_color: color });
+});
+
+// ── BACKGROUND COLOR ────────────────────────────────────────────────
+
+router.post('/profile/background-color', authenticate, async (req, res) => {
+  const { color } = req.body || {};
+  const user = await getUserById(req.user.id);
+  if (!user || !user.active) return res.status(403).json({ error: 'Compte désactivé.' });
+  if (!/^#[0-9a-fA-F]{6}$/.test(color)) return res.status(400).json({ error: 'Couleur invalide (format hex #RRGGBB).' });
+
+  await query('UPDATE users SET background_color = $1, updated_at = now() WHERE id = $2', [color, user.id]);
+  res.json({ background_color: color });
+});
+
+// ── OLLAMA / AI STATUS ──────────────────────────────────────────────
+
+router.get('/ai/status', async (req, res) => {
+  const available = await checkOllama();
+  res.json({
+    ollamaAvailable: available,
+    model: process.env.OLLAMA_MODEL || 'hopeveri-fable5',
+  });
+});
+
+// Enhanced detect with AI (Ollama) — falls back to rule-based
+router.post('/detect/ai', authenticate, async (req, res) => {
+  const { text, profile, docType } = req.body || {};
+  const user = await getUserById(req.user.id);
+  if (!user || !user.active) return res.status(403).json({ error: 'Compte désactivé.' });
+
+  await checkAndResetQuota(user);
+  if (user.daily_quota <= 0) return res.status(429).json({ error: 'Quota journalier épuisé.' });
+  if (!text || typeof text !== 'string' || text.trim().length < 10) {
+    return res.status(400).json({ error: 'Texte trop court (min 10 caractères).' });
+  }
+
+  const trimmed = text.trim();
+  let result = await detectWithAI(trimmed, profile, docType);
+
+  if (!result) {
+    // Fallback to rule-based
+    result = detect(trimmed, profile || 'etudiant', docType || 'autre');
+    result.aiEnhanced = false;
+  } else {
+    result.aiEnhanced = true;
+  }
+
+  await query('UPDATE users SET daily_quota = daily_quota - 1 WHERE id = $1', [user.id]);
+  await createAnalysisLog(user.id, trimmed, result, profile || 'etudiant', docType || 'autre', 'detect_ai');
+
+  res.json({ ...result, quotaRemaining: user.daily_quota - 1 });
+});
+
+// Enhanced hopeIA chat (Ollama) — falls back to rule-based
+router.post('/hopeia/chat', authenticate, async (req, res) => {
+  const { text, profile } = req.body || {};
+  const user = await getUserById(req.user.id);
+  if (!user || !user.active) return res.status(403).json({ error: 'Compte désactivé.' });
+
+  await checkAndResetQuota(user);
+  if (user.daily_quota <= 0) return res.status(429).json({ error: 'Quota journalier épuisé.' });
+  if (!text || typeof text !== 'string' || text.trim().length < 10) {
+    return res.status(400).json({ error: 'Texte trop court (min 10 caractères).' });
+  }
+
+  const trimmed = text.trim();
+  let humanizedText = await humanizeWithAI(trimmed, profile);
+
+  if (!humanizedText) {
+    humanizedText = humanize(trimmed, profile || 'professional');
+  }
+
+  const result = detect(trimmed, profile || 'professional', 'autre');
+  await query('UPDATE users SET daily_quota = daily_quota - 1 WHERE id = $1', [user.id]);
+  await createAnalysisLog(user.id, trimmed, result, profile || 'professional', 'humanize', 'humanize_ai', humanizedText);
+
+res.json({ original: trimmed, humanized: humanizedText, quotaRemaining: user.daily_quota - 1 });
+});
+
+// Enhanced humanize with AI (Ollama) — falls back to rule-based
+router.post('/humanize/ai', authenticate, async (req, res) => {
+  // Backward compatibility for the existing humanize-with-AI endpoint.
+  const { text, profile } = req.body || {};
+  const user = await getUserById(req.user.id);
+  if (!user || !user.active) return res.status(403).json({ error: 'Compte désactivé.' });
+
+  await checkAndResetQuota(user);
+  if (user.daily_quota <= 0) return res.status(429).json({ error: 'Quota journalier épuisé.' });
+  if (!text || typeof text !== 'string' || text.trim().length < 10) {
+    return res.status(400).json({ error: 'Texte trop court (min 10 caractères).' });
+  }
+
+  const trimmed = text.trim();
+  let humanizedText = await humanizeWithAI(trimmed, profile);
+
+  if (!humanizedText) {
+    humanizedText = humanize(trimmed, profile || 'professional');
+  }
+
+  const result = detect(trimmed, profile || 'professional', 'autre');
+  await query('UPDATE users SET daily_quota = daily_quota - 1 WHERE id = $1', [user.id]);
+  await createAnalysisLog(user.id, trimmed, result, profile || 'professional', 'humanize', 'humanize_ai', humanizedText);
+
+  res.json({ original: trimmed, humanized: humanizedText, quotaRemaining: user.daily_quota - 1 });
 });
 
 module.exports = router;
